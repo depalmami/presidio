@@ -141,7 +141,7 @@ class BboxProcessor:
     def match_with_source(
         all_pos: List[Dict[str, Union[str, int, float]]],
         pii_source_dict: List[Dict[str, Union[str, int, float]]],
-        detected_pii: Dict[str, Union[str, float, int]],
+        detected_pii: ImageRecognizerResult,
         tolerance: int = 50,
     ) -> Tuple[List[Dict[str, Union[str, int, float]]], bool]:
         """Match returned redacted PII bbox data with some source of truth for PII.
@@ -156,12 +156,12 @@ class BboxProcessor:
         all_pos_match = all_pos.copy()
 
         # Get info from detected PII (positive)
-        results_left = detected_pii["left"]
-        results_top = detected_pii["top"]
-        results_width = detected_pii["width"]
-        results_height = detected_pii["height"]
+        results_left = detected_pii.left
+        results_top = detected_pii.top
+        results_width = detected_pii.width
+        results_height = detected_pii.height
         try:
-            results_score = detected_pii["score"]
+            results_score = detected_pii.score
         except KeyError:
             # Handle matching when no score available
             results_score = 0

@@ -5,7 +5,7 @@ because that is covered by testing of the "verify" function in
 the original parent ImagePiiVerifyEngine class.
 """
 
-import PIL
+from PIL import Image
 import pydicom
 
 from presidio_image_redactor import DicomImagePiiVerifyEngine
@@ -42,5 +42,19 @@ def test_verify_correctly(
     test_all_labels = set(expected_ocr_results_labels).union(set(test_ocr_results_labels))
 
     # Assert
-    assert isinstance(test_image_verify, PIL.Image.Image)
+    assert isinstance(test_image_verify, Image.Image)
     assert len(test_common_labels) / len(test_all_labels) >= 0.5
+
+
+def test_eval_dicom_instance(
+    get_mock_dicom_instance: pydicom.dataset.FileDataset,
+    get_mock_dicom_verify_results: dict,
+):
+
+    ground_truth = get_mock_dicom_verify_results["ground_truth"]
+    verify_engine = DicomImagePiiVerifyEngine()
+    _, test_eval_results = verify_engine.eval_dicom_instance(instance=get_mock_dicom_instance,
+                                                             ground_truth=ground_truth)
+
+    assert test_eval_results["precision"] == 1.0
+    assert test_eval_results["recall"] == 1.0

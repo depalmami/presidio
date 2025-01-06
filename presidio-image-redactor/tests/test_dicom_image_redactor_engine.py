@@ -1213,8 +1213,8 @@ def test_get_analyzer_results_happy_path(
     """
     # Arrange
     mock_analyze = mocker.patch(
-        "presidio_image_redactor.dicom_image_redactor_engine.ImageAnalyzerEngine.analyze",
-        return_value=None,
+        "presidio_image_redactor.dicom_image_redactor_engine.ImageAnalyzerEngine.analyze_and_return_intermediate",
+        return_value=([],{}, None, {}),
     )
     mock_get_text_metadata = mocker.patch(
         "presidio_image_redactor.dicom_image_redactor_engine.DicomImageRedactorEngine._get_text_metadata",
@@ -1332,7 +1332,7 @@ def test_DicomImageRedactorEngine_redact_and_return_bbox(
     )
     mock_analyze = mocker.patch(
         "presidio_image_redactor.dicom_image_redactor_engine.DicomImageRedactorEngine._get_analyzer_results",
-        return_value=None,
+        return_value=([], {}, None, {}),
     )
 
     mock_get_analyze_bbox = mocker.patch(
@@ -1546,7 +1546,7 @@ def test_DicomImageRedactorEngine_redact_single_dicom_image_happy_path(
 
     mock_analyze = mocker.patch(
         "presidio_image_redactor.dicom_image_redactor_engine.DicomImageRedactorEngine._get_analyzer_results",
-        return_value=None,
+        return_value=([], {}, None, {}),
     )
 
     mock_get_analyze_bbox = mocker.patch(

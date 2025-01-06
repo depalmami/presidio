@@ -5,7 +5,7 @@ import tempfile
 import uuid
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 import numpy as np
 import png
@@ -56,35 +56,14 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
 
         :return: DICOM instance with redacted pixel data.
         """
-        # Check input
-        if type(image) not in [pydicom.dataset.FileDataset, pydicom.dataset.Dataset]:
-            raise TypeError("The provided image must be a loaded DICOM instance.")
-        try:
-            image.PixelData
-        except AttributeError as e:
-            raise AttributeError(f"Provided DICOM instance lacks pixel data: {e}")
-        except PermissionError as e:
-            raise PermissionError(f"Unable to access pixel data (may not exist): {e}")
-        except IsADirectoryError as e:
-            raise IsADirectoryError(f"DICOM instance is a directory: {e}")
 
         instance = deepcopy(image)
 
-        # Load image for processing
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            # Convert DICOM to PNG and add padding for OCR (during analysis)
-            is_greyscale = self._check_if_greyscale(instance)
-            image = self._rescale_dcm_pixel_array(instance, is_greyscale)
-            image_name = str(uuid.uuid4())
-            self._save_pixel_array_as_png(image, is_greyscale, image_name, tmpdirname)
-
-            png_filepath = f"{tmpdirname}/{image_name}.png"
-            loaded_image = Image.open(png_filepath)
-            image = self._add_padding(loaded_image, is_greyscale, padding_width)
+        pixel_image: Image = self._get_image_from_dicom(image, padding_width)
 
         # Detect PII
-        analyzer_results = self._get_analyzer_results(
-            image,
+        analyzer_results, _, _, _ = self._get_analyzer_results(
+            pixel_image,
             instance,
             use_metadata,
             ocr_kwargs,
@@ -100,6 +79,41 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         redacted_image = self._add_redact_box(instance, bboxes, crop_ratio, fill)
 
         return redacted_image, bboxes
+
+    def _get_image_from_dicom(
+        self, dicom_image: pydicom.dataset.FileDataset, padding_width: int
+    ) -> Image.Image:
+        """Get image from DICOM instance."""
+
+        # Check input
+        if type(dicom_image) not in [
+            pydicom.dataset.FileDataset,
+            pydicom.dataset.Dataset,
+        ]:
+            raise TypeError("The provided image must be a loaded DICOM instance.")
+        try:
+            dicom_image.PixelData
+        except AttributeError as e:
+            raise AttributeError(f"Provided DICOM instance lacks pixel data: {e}")
+        except PermissionError as e:
+            raise PermissionError(f"Unable to access pixel data (may not exist): {e}")
+        except IsADirectoryError as e:
+            raise IsADirectoryError(f"DICOM instance is a directory: {e}")
+
+        is_greyscale = self._check_if_greyscale(dicom_image)
+
+        # Load image for processing
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            # Convert DICOM to PNG and add padding for OCR (during analysis)
+
+            image = self._rescale_dcm_pixel_array(dicom_image, is_greyscale)
+            image_name = str(uuid.uuid4())
+            self._save_pixel_array_as_png(image, is_greyscale, image_name, tmpdirname)
+
+            png_filepath = f"{tmpdirname}/{image_name}.png"
+            loaded_image = Image.open(png_filepath)
+            image = self._add_padding(loaded_image, is_greyscale, padding_width)
+        return image
 
     def redact(
         self,
@@ -935,7 +949,9 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         ocr_kwargs: Optional[dict],
         ad_hoc_recognizers: Optional[List[PatternRecognizer]],
         **text_analyzer_kwargs,
-    ) -> List[ImageRecognizerResult]:
+    ) -> Tuple[
+        List[ImageRecognizerResult], Dict[str, Any], Image.Image, Dict[str, Any]
+    ]:
         """Analyze image with selected redaction approach.
 
         :param image: DICOM pixel data as PIL image.
@@ -948,7 +964,11 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         :param text_analyzer_kwargs: Additional values for the analyze method
         in AnalyzerEngine (e.g., allow_list).
 
-        :return: Analyzer results.
+        :return: Analyzer results with intermediate results. Tuple consisting of:
+        1. List of the extract entities with image bounding boxes.
+        2. OCR results.
+        3. Image after preprocessing.
+        4. Preprocessing metadata
         """
         # Check the ad-hoc recognizers list
         self._check_ad_hoc_recognizer_list(ad_hoc_recognizers)
@@ -967,21 +987,16 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
                 ad_hoc_recognizers.append(deny_list_recognizer)
 
         # Detect PII
-        if ad_hoc_recognizers is None:
-            analyzer_results = self.image_analyzer_engine.analyze(
-                image,
-                ocr_kwargs=ocr_kwargs,
-                **text_analyzer_kwargs,
-            )
-        else:
-            analyzer_results = self.image_analyzer_engine.analyze(
+        analyzer_results, ocr_result, image, preprocessing_metadata = (
+            self.image_analyzer_engine.analyze_and_return_intermediate(
                 image,
                 ocr_kwargs=ocr_kwargs,
                 ad_hoc_recognizers=ad_hoc_recognizers,
                 **text_analyzer_kwargs,
             )
+        )
 
-        return analyzer_results
+        return analyzer_results, ocr_result, image, preprocessing_metadata
 
     @staticmethod
     def _save_bbox_json(output_dcm_path: str, bboxes: List[Dict[str, int]]) -> None:
@@ -1061,7 +1076,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
             image = self._add_padding(loaded_image, is_greyscale, padding_width)
 
         # Detect PII
-        analyzer_results = self._get_analyzer_results(
+        analyzer_results, _, _, _ = self._get_analyzer_results(
             image,
             instance,
             use_metadata,

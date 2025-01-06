@@ -1,6 +1,6 @@
 import io
 from copy import deepcopy
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -52,9 +52,35 @@ class ImageAnalyzerEngine:
 
         :return: List of the extract entities with image bounding boxes.
         """
+        bboxes, ocr_result, image, preprocessing_metadata = self.analyze_and_return_intermediate(
+            image=image,
+            ocr_kwargs=ocr_kwargs,
+            **text_analyzer_kwargs
+        )
+
+        return bboxes
+
+    def analyze_and_return_intermediate(
+            self, image: object, ocr_kwargs: Optional[dict] = None,
+            **text_analyzer_kwargs
+    ) -> Tuple[List[ImageRecognizerResult], Dict[str, Any], Image.Image, Dict[str, Any]]:
+        """Analyze the given image and return all intermediate steps.
+
+        :param image: PIL Image/numpy array or file path(str) to be processed.
+        :param ocr_kwargs: Additional params for OCR methods.
+        :param text_analyzer_kwargs: Additional values for the analyze method
+        in AnalyzerEngine.
+
+        :return: Tuple consisting of:
+        1. List of the extract entities with image bounding boxes.
+        2. OCR results.
+        3. Image after preprocessing.
+        4. Preprocessing metadata
+
+        """
         # Perform OCR
         perform_ocr_kwargs, ocr_threshold = self._parse_ocr_kwargs(ocr_kwargs)
-        image, preprocessing_metadata = self.image_preprocessor.preprocess_image(image)
+        preprocessed_image, preprocessing_metadata = self.image_preprocessor.preprocess_image(image)
         ocr_result = self.ocr.perform_ocr(image, **perform_ocr_kwargs)
         ocr_result = self.remove_space_boxes(ocr_result)
 
@@ -81,7 +107,7 @@ class ImageAnalyzerEngine:
             analyzer_result, ocr_result, text, allow_list
         )
 
-        return bboxes
+        return bboxes, ocr_result, preprocessed_image, preprocessing_metadata
 
     @staticmethod
     def threshold_ocr_result(ocr_result: dict, ocr_threshold: float) -> dict:
@@ -327,12 +353,12 @@ class ImageAnalyzerEngine:
 
     @staticmethod
     def get_pii_bboxes(
-        ocr_bboxes: List[dict], analyzer_bboxes: List[dict]
+        ocr_bboxes: List[dict], analyzer_bboxes: List[ImageRecognizerResult]
     ) -> List[dict]:
         """Get a list of bboxes with is_PII property.
 
         :param ocr_bboxes: Bboxes from OCR results.
-        :param analyzer_bboxes: Bboxes from analyzer results.
+        :param analyzer_bboxes: image analyzer results.
 
         :return: All bboxes with appropriate label for whether it is PHI or not.
         """
@@ -343,17 +369,17 @@ class ImageAnalyzerEngine:
             # Check if we have the same bbox in analyzer results
             for analyzer_bbox in analyzer_bboxes:
                 has_same_position = (
-                    ocr_bbox["left"] == analyzer_bbox["left"]
-                    and ocr_bbox["top"] == analyzer_bbox["top"]
+                    ocr_bbox["left"] == analyzer_bbox.left
+                    and ocr_bbox["top"] == analyzer_bbox.top
                 )  # noqa: E501
                 has_same_dimension = (
-                    ocr_bbox["width"] == analyzer_bbox["width"]
-                    and ocr_bbox["height"] == analyzer_bbox["height"]
+                    ocr_bbox["width"] == analyzer_bbox.width
+                    and ocr_bbox["height"] == analyzer_bbox.height
                 )  # noqa: E501
                 is_same = has_same_position is True and has_same_dimension is True
 
                 if is_same is True:
-                    current_bbox = analyzer_bbox
+                    current_bbox = ocr_bbox
                     current_bbox["is_PII"] = True
                     has_match = True
                     break

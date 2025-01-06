@@ -1,10 +1,7 @@
-import tempfile
-from copy import deepcopy
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Union
 
-import PIL
-import pydicom
 from PIL import Image
+import pydicom
 from presidio_analyzer import PatternRecognizer
 
 from presidio_image_redactor import (
@@ -15,6 +12,7 @@ from presidio_image_redactor import (
     ImagePiiVerifyEngine,
     TesseractOCR,
 )
+from presidio_image_redactor.entities import ImageRecognizerResult
 
 
 class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
@@ -55,12 +53,16 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
         ocr_kwargs: Optional[dict] = None,
         ad_hoc_recognizers: Optional[List[PatternRecognizer]] = None,
         **text_analyzer_kwargs,
-    ) -> Tuple[Optional[PIL.Image.Image], dict, list]:
+    ) -> Tuple[
+        Optional[Image.Image],
+        Dict[str, Union[str, int, float]],
+        List[ImageRecognizerResult],
+    ]:
         """Verify PII on a single DICOM instance.
 
         :param instance: Loaded DICOM instance including pixel data and metadata.
         :param padding_width: Padding width to use when running OCR.
-        :param display_image: If the verificationimage is displayed and returned.
+        :param display_image: If the verification image is displayed and returned.
         :param show_text_annotation: True to display entity type when displaying
         image with bounding boxes.
         :param use_metadata: Whether to redact text in the image that
@@ -74,51 +76,22 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
         :return: Image with boxes identifying PHI, OCR results,
         and analyzer results.
         """
-        instance_copy = deepcopy(instance)
-
-        try:
-            instance_copy.PixelData
-        except AttributeError:
-            raise AttributeError("Provided DICOM instance lacks pixel data.")
-
-        # Load image for processing
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            # Convert DICOM to PNG and add padding for OCR (during analysis)
-            is_greyscale = self._check_if_greyscale(instance_copy)
-            image = self._rescale_dcm_pixel_array(instance_copy, is_greyscale)
-            self._save_pixel_array_as_png(image, is_greyscale, "tmp_dcm", tmpdirname)
-
-            png_filepath = f"{tmpdirname}/tmp_dcm.png"
-            loaded_image = Image.open(png_filepath)
-            image = self._add_padding(loaded_image, is_greyscale, padding_width)
+        # Load image
+        image = self._get_image_from_dicom(instance, padding_width)
+        is_greyscale = self._check_if_greyscale(instance)
 
         # Get OCR results
-        perform_ocr_kwargs, ocr_threshold = (
-            self.image_analyzer_engine._parse_ocr_kwargs(ocr_kwargs)
-        )  # noqa: E501
-        ocr_results = self.ocr_engine.perform_ocr(image, **perform_ocr_kwargs)
-        if ocr_threshold:
-            ocr_results = self.image_analyzer_engine.threshold_ocr_result(
-                ocr_results, ocr_threshold
+        analyzer_results, ocr_result, preprocessed_image, preprocessing_metadata = (
+            self.image_analyzer_engine.analyze_and_return_intermediate(
+                image, ocr_kwargs, **text_analyzer_kwargs
             )
-        ocr_bboxes = self.bbox_processor.get_bboxes_from_ocr_results(ocr_results)
+        )
 
-        # Get analyzer results
-        analyzer_results = self._get_analyzer_results(
-            image,
-            instance,
-            use_metadata,
-            ocr_kwargs,
-            ad_hoc_recognizers,
-            **text_analyzer_kwargs,
-        )
-        analyzer_bboxes = self.bbox_processor.get_bboxes_from_analyzer_results(
-            analyzer_results
-        )
+        ocr_bboxes = self.bbox_processor.get_bboxes_from_ocr_results(ocr_result)
 
         # Prepare for plotting
         pii_bboxes = self.image_analyzer_engine.get_pii_bboxes(
-            ocr_bboxes, analyzer_bboxes
+            ocr_bboxes, analyzer_results
         )
         if is_greyscale:
             use_greyscale_cmap = True
@@ -126,7 +99,7 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
             use_greyscale_cmap = False
 
         # Get image with verification boxes
-        verify_image = (
+        verify_image: Image = (
             self.image_analyzer_engine.add_custom_bboxes(
                 image, pii_bboxes, show_text_annotation, use_greyscale_cmap
             )
@@ -134,12 +107,12 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
             else None
         )
 
-        return verify_image, ocr_bboxes, analyzer_bboxes
+        return verify_image, ocr_bboxes, analyzer_results
 
     def eval_dicom_instance(
         self,
         instance: pydicom.dataset.FileDataset,
-        ground_truth: dict,
+        ground_truth: List[dict],
         padding_width: int = 25,
         tolerance: int = 50,
         display_image: bool = False,
@@ -147,14 +120,14 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
         ocr_kwargs: Optional[dict] = None,
         ad_hoc_recognizers: Optional[List[PatternRecognizer]] = None,
         **text_analyzer_kwargs,
-    ) -> Tuple[Optional[PIL.Image.Image], dict]:
+    ) -> Tuple[Optional[Image.Image], dict]:
         """Evaluate performance for a single DICOM instance.
 
         :param instance: Loaded DICOM instance including pixel data and metadata.
         :param ground_truth: Dictionary containing ground truth labels for the instance.
         :param padding_width: Padding width to use when running OCR.
         :param tolerance: Pixel distance tolerance for matching to ground truth.
-        :param display_image: If the verificationimage is displayed and returned.
+        :param display_image: If the verification image is displayed and returned.
         :param use_metadata: Whether to redact text in the image that
         are present in the metadata.
         :param ocr_kwargs: Additional params for OCR methods.
@@ -175,19 +148,13 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
             ad_hoc_recognizers=ad_hoc_recognizers,
             **text_analyzer_kwargs,
         )
-        formatted_ocr_results = self.bbox_processor.get_bboxes_from_ocr_results(
-            ocr_results
-        )
-        detected_phi = self.bbox_processor.get_bboxes_from_analyzer_results(
-            analyzer_results
-        )
 
         # Remove duplicate entities in results
-        detected_phi = self._remove_duplicate_entities(detected_phi)
+        analyzer_results = self._remove_duplicate_entities(analyzer_results)
 
         # Get correct PHI text (all TP and FP)
         all_pos = self._label_all_positives(
-            ground_truth, formatted_ocr_results, detected_phi, tolerance
+            ground_truth, ocr_results, analyzer_results, tolerance
         )
 
         # Calculate evaluation metrics
@@ -205,8 +172,8 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
 
     @staticmethod
     def _remove_duplicate_entities(
-        results: List[dict], dup_pix_tolerance: int = 5
-    ) -> List[dict]:
+        results: List[Dict], dup_pix_tolerance: int = 5
+    ) -> List[Dict]:
         """Handle when a word is detected multiple times as different types of entities.
 
         :param results: List of detected PHI with bbox info.
@@ -214,7 +181,7 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
         :return: Detected PHI with no duplicate entities.
         """
         dups = []
-        sorted(results, key=lambda x: x["score"], reverse=True)
+        sorted(results, key=lambda x: x.score, reverse=True)
         results_no_dups = []
         dims = ["left", "top", "width", "height"]
 
@@ -234,9 +201,7 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
 
                     if all(matching):
                         lower_scored_index = (
-                            other
-                            if results[other]["score"] < results[i]["score"]
-                            else i
+                            other if results[other]["score"] < results[i]["score"] else i
                         )
                         dups.append(lower_scored_index)
 
@@ -249,18 +214,18 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
 
     def _label_all_positives(
         self,
-        gt_labels_dict: dict,
+        gt_labels_dict: List[dict],
         ocr_results: List[dict],
-        detected_phi: List[dict],
+        detected_phi: List[ImageRecognizerResult],
         tolerance: int = 50,
-    ) -> List[dict]:
+    ) -> List[ImageRecognizerResult]:
         """Label all entities detected as PHI by using ground truth and OCR results.
 
         All positives (detected_phi) do not contain PHI labels and are thus
         difficult to work with intuitively. This method maps back to the
         actual PHI to each detected sensitive entity.
 
-        :param gt_labels_dict: Dictionary with ground truth labels for a
+        :param gt_labels_dict: A list of Dictionaries with ground truth labels for a
         single DICOM instance.
         :param ocr_results: All detected text.
         :param detected_phi: Formatted analyzer_results.
@@ -282,13 +247,34 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
                     all_pos, ocr_results, analyzer_result, tolerance
                 )
 
-        # Remove any duplicates
-        all_pos = self._remove_duplicate_entities(all_pos)
+        all_pos_results = self._remove_duplicate_entities(all_pos)
 
-        return all_pos
+        return all_pos_results
 
     @staticmethod
-    def calculate_precision(gt: List[dict], all_pos: List[dict]) -> float:
+    def __dict_to_image_recognizer_result(
+        all_pos: List[Dict],
+    ) -> List[ImageRecognizerResult]:
+        fields = (
+            "score",
+            "left",
+            "top",
+            "width",
+            "height",
+        )
+        to_recognizer_results = [
+            {key: d[key] for key in fields if key in d} for d in all_pos
+        ]
+
+        all_pos_results = [
+            ImageRecognizerResult(**pos) for pos in to_recognizer_results
+        ]
+        return all_pos_results
+
+    @staticmethod
+    def calculate_precision(
+        gt: List[dict], all_pos: List[ImageRecognizerResult]
+    ) -> float:
         """Calculate precision.
 
         :param gt: List of ground truth labels.
@@ -305,7 +291,7 @@ class DicomImagePiiVerifyEngine(ImagePiiVerifyEngine, DicomImageRedactorEngine):
         return precision
 
     @staticmethod
-    def calculate_recall(gt: List[dict], all_pos: List[dict]) -> float:
+    def calculate_recall(gt: List[dict], all_pos: List[ImageRecognizerResult]) -> float:
         """Calculate recall.
 
         :param gt: List of ground truth labels.
