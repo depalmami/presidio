@@ -28,6 +28,7 @@ stages:
               REGISTRY_NAME: $(REGISTRY_NAME)
               TAG: $(TAG)
               AZURE_SUBSCRIPTION: $(ACR_AZURE_SUBSCRIPTION)
+          - task: ComponentGovernanceComponentDetection@0
 
       - job: E2ETests
         displayName: E2E Tests
